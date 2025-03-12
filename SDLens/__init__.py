@@ -1,1 +1,1 @@
-from .hooked_sd_pipeline import HookedIFPipeline, HookedStableDiffusionXLPipeline
+from .hooked_sd_pipeline import HookedIFPipeline, HookedStableDiffusionXLPipeline, HookedFluxPipeline

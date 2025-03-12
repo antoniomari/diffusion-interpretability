@@ -1,10 +1,15 @@
 from diffusers import DDPMScheduler
 import torch
 
+# I can ignore this class for now
 class HookedNoiseScheduler:
     scheduler: DDPMScheduler
     pre_hooks: list
     post_hooks: list
+
+    # Callback run after each layer (access input, output of the layer, different types)
+    # forward hooks: called in the forward pass 
+    # pre hooks called before forward, post hook after the forward
 
     def __init__(self, scheduler):
         object.__setattr__(self, 'scheduler', scheduler)

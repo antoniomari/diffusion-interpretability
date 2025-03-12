@@ -224,7 +224,17 @@ def normalized_mse(recon: torch.Tensor, xs: torch.Tensor) -> torch.Tensor:
 
     return loss
 
+
 def explained_variance(recons, x):
+    """_summary_
+
+    Args:
+        recons (_type_): _description_
+        x (_type_): _description_
+
+    Returns:
+        _type_: _description_
+    """
     # Compute the variance of the difference
     diff = x - recons
     diff_var = torch.var(diff, dim=0, unbiased=False)
@@ -236,6 +246,25 @@ def explained_variance(recons, x):
     explained_var = 1 - diff_var / (x_var + 1e-8)
 
     return explained_var.mean()
+
+
+def loss(ae: SparseAutoencoder, cfg_sae: SAETrainingConfig, flat_acts_train_batch, 
+        recons, info, logger, mse_scale):
+    # MSE
+    logger.logkv("train_recons", mse_scale * mse(recons, flat_acts_train_batch))
+    # AuxK
+    + logger.logkv(
+        "train_maxk_recons",
+        cfg_sae.auxk_coef
+        * normalized_mse(
+            ae.decode_sparse(
+                info["auxk_inds"],
+                info["auxk_vals"],
+            ),
+            flat_acts_train_batch - recons.detach() + ae.pre_bias.detach(),
+        ).nan_to_num(0),
+    )
+    
 
 
 def main():
@@ -262,6 +291,7 @@ def main():
     for ae in aes:
         init_from_data_(ae, stats_acts_sample)
     
+    # TODO: what is this for? 
     mse_scale = (
         1 / ((stats_acts_sample.float().mean(dim=0) - stats_acts_sample.float()) ** 2).mean()
     )
@@ -281,22 +311,7 @@ def main():
     training_loop_(
         aes,
         acts_iter,
-        lambda ae, cfg_sae, flat_acts_train_batch, recons, info, logger: (
-            # MSE
-            logger.logkv("train_recons", mse_scale * mse(recons, flat_acts_train_batch))
-            # AuxK
-            + logger.logkv(
-                "train_maxk_recons",
-                cfg_sae.auxk_coef
-                * normalized_mse(
-                    ae.decode_sparse(
-                        info["auxk_inds"],
-                        info["auxk_vals"],
-                    ),
-                    flat_acts_train_batch - recons.detach() + ae.pre_bias.detach(),
-                ).nan_to_num(0),
-            )
-        ),
+        loss=lambda ae, cfg_sae, flat_acts_train_batch, recons, info, logger: loss(ae, cfg_sae, flat_acts_train_batch, recons, info, logger, mse_scale),
         sae_cfgs = cfg.saes,
         loggers=loggers,
         log_interval=cfg.log_interval,

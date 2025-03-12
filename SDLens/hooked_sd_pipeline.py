@@ -1,5 +1,5 @@
 import einops
-from diffusers import StableDiffusionXLPipeline, IFPipeline
+from diffusers import StableDiffusionXLPipeline, IFPipeline, FluxPipeline
 from typing import List, Dict, Callable, Union
 import torch
 from .hooked_scheduler import HookedNoiseScheduler
@@ -34,6 +34,7 @@ class HookedDiffusionAbstractPipeline:
     def run_with_hooks(self, 
         *args,
         position_hook_dict: Dict[str, Union[Callable, List[Callable]]], 
+        with_kwargs=False,
         **kwargs
     ):
         '''
@@ -49,18 +50,21 @@ class HookedDiffusionAbstractPipeline:
             **kwargs: Keyword arguments to pass to the pipeline.
         '''
         hooks = []
+
+        # Register hooks
         for position, hook in position_hook_dict.items():
             if isinstance(hook, list):
                 for h in hook:
-                    hooks.append(self._register_general_hook(position, h))
+                    hooks.append(self._register_general_hook(position, h, with_kwargs))
             else:
-                hooks.append(self._register_general_hook(position, hook))
+                hooks.append(self._register_general_hook(position, hook, with_kwargs))
 
         hooks = [hook for hook in hooks if hook is not None]
 
         try:
             output = self.pipe(*args, **kwargs)
         finally:
+            # Remove hooks
             for hook in hooks:
                 hook.remove()
             if self.use_hooked_scheduler:
@@ -282,7 +286,7 @@ class HookedDiffusionAbstractPipeline:
         
         return attn_block.register_forward_hook(hook, with_kwargs=True) 
 
-    def _register_general_hook(self, position, hook):
+    def _register_general_hook(self, position, hook, with_kwargs=False):
         if position == 'scheduler_pre':
             if not self.use_hooked_scheduler:
                 raise ValueError('Cannot register hooks on scheduler without using hooked scheduler')
@@ -295,7 +299,7 @@ class HookedDiffusionAbstractPipeline:
             return
 
         block = self._locate_block(position)
-        return block.register_forward_hook(hook)
+        return block.register_forward_hook(hook, with_kwargs=with_kwargs)
 
     def to(self, *args, **kwargs):
         self.pipe = self.pipe.to(*args, **kwargs)
@@ -313,6 +317,10 @@ class HookedDiffusionAbstractPipeline:
 
 class HookedStableDiffusionXLPipeline(HookedDiffusionAbstractPipeline):
     parent_cls = StableDiffusionXLPipeline
+
+
+class HookedFluxPipeline(HookedDiffusionAbstractPipeline):
+    parent_cls = FluxPipeline
 
 
 class HookedIFPipeline(HookedDiffusionAbstractPipeline):
