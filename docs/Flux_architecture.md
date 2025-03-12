@@ -79,9 +79,53 @@ This structured breakdown should help you understand the architecture at a glanc
 
 
 ## Computational Graph
+H = height of latents
+
+W = width of latents
+
+ch = channels of latents
+
 ```mermaid
 graph TD
-    A["Text Prompt (prompt)"] -->|"CLIP Encoder (pooled_output)"| B["pooled_prompt_embeds (batch, 768)"]
-    C["Text Prompt 2 (prompt_2)"] -->|T5 Encoder| D["prompt_embeds 
-    (batch, seq_len, 4096)"]
+    %% nodes
+    time["timesteps <br> (T,)"] --> |"select timestep"| timestep["t <br> (B,)"];
+    prompt1["Text prompt"] --> |"CLIP Encoder (pooled_output)"| prompt1_emb["pooled_prompt_embeds (batch, 768)"];
+    prompt2["Text prompt 2"] --> |T5 Encoder| prompt2_emb["prompt_embeds <br> (batch, seq_len, 4096)"];
+    latents["Latents <br> (batch, ch, H, W)"] --> | 2 x 2 patch | latents_patch["Latents patched <br> (batch, H/2 * W/2, 4 * ch)"];
+    prompt2_emb --> txt_img_ids["concat(txt_ids, img_ids) (shape?)"];
+    latents_patch --> txt_img_ids;
+
+    %% transformer
+    plus["\+"]
+    time_text_emb["temb <br> (B, 3072)"];
+    image_rotary_emb["image_rotary_emb (shape?)"];
+    transformer_blocks["Transformer blocks (x19)"]
+    latents_patch --> |"x_embedder (Linear)"| hidden_states["hidden_states <br> (B, H/2 * W/2, 3072)"]
+    timestep --> |"sinusoidal emb <br> Linear -> SiLU -> Linear"| time_emb["(B, 3072)"];
+    prompt1_emb --> |Linear -> SiLU -> Linear| pooled_text_emb["(B, 3072)"];
+    pooled_text_emb --> plus;
+    time_emb --> plus; 
+    plus --> time_text_emb;
+    prompt2_emb --> |"context_emb (Linear)"| encoder_hidden_states["encoder_hidden_states <br> (batch, seq_len, 3072)"];
+    txt_img_ids --> |FluxPositionalEmb | image_rotary_emb
+    hidden_states --> transformer_blocks;
+    encoder_hidden_states --> transformer_blocks;
+    time_text_emb --> transformer_blocks;
+    image_rotary_emb --> transformer_blocks;
+    transformer_blocks --> encoder_hidden_states1["encoder_hidden_states (batch, seq_len, 3072)"]
+    transformer_blocks --> hidden_states1["hidden_states (batch, H/2 * W/2, 3072)"]
+    encoder_hidden_states1 --> concat_states["concat(enc_hid, hid) <br> (batch, seq_len + H/2 * W/2, 3072)"]
+    hidden_states1 --> concat_states
+
+    concat_states --> single_transformer["Single transformer blocks (x38)"]
+    time_text_emb --> single_transformer
+    image_rotary_emb --> single_transformer
+    single_transformer --> |"slice output [:, seq_len:, :]"| hidden_states2["noise_pred <br> (batch, H/2 * W/2, 3072)"]
+    hidden_states2 --> |AdaLayerNormContinuous| noise_pred_norm["noise_pred Normalized <br> (batch, H/2 * W/2, 3072)"];
+    noise_pred_norm --> |Linear Projection| output["noise_pred_out <br> (batch, H/2 * W/2, 4 * ch)"]
+
+    %% Apply colors to specific nodes
+    style transformer_blocks fill:#ffcc00,stroke:#000,stroke-width:2px,color:#000;
+    style single_transformer fill:#ffcc00,stroke:#000,stroke-width:2px,color:#000;
+
 ```
