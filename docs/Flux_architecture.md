@@ -71,6 +71,7 @@ graph TD
 
 
 ```
+![alt text](image-5.png)
 
 In particular, pay attention to:
 - **AdaLayerNormZero**
@@ -92,6 +93,8 @@ In particular, pay attention to:
 
 ## Single Transformer Blocks
 These blocks are introduced in the [DiT](https://arxiv.org/abs/2212.09748) paper.
+
+![alt text](image-6.png)
 
 In particular, pay attention to:
 - **AdaLayerNormZeroSingle**: Similar to AdaLayerNormZero but adapted for single-path attention.
