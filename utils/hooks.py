@@ -73,3 +73,91 @@ def ablate_block(*args):
         print(input[0].shape, input[1].shape, output.shape)
         print(output)
         raise AssertionError(f"Block {module.__class__.__name__} not supported.")
+
+
+class AttentionCacheForwardHook:
+
+    def __init__(self):
+        self.cache = {}
+
+    # Define a hook function
+    @torch.no_grad()
+    def get_attention_output(self, *args):
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+            self.cache["encoder_hidden_states"] = output[0] - kwinput["encoder_hidden_states"]
+            self.cache["hidden_states"] = output[1] - kwinput["hidden_states"]
+        elif isinstance(module, FluxSingleTransformerBlock):
+            self.cache["hidden_states"] = output - kwinput["hidden_states"]
+
+        
+    @torch.no_grad()
+    def set_attention_output(self, *args, encoder_hidden_states=False):
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+
+            ablated_hidden_states = kwinput["hidden_states"] + self.cache["hidden_states"]
+
+            if encoder_hidden_states:
+                ablated_encoder_hidden_states = kwinput["encoder_hidden_states"] + self.cache["encoder_hidden_states"]
+            else: 
+                ablated_encoder_hidden_states = output[0]
+
+            return ablated_encoder_hidden_states, ablated_hidden_states
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            return kwinput["hidden_states"] + self.cache["hidden_states"]
+
+            
+class PromptCachePreForwardHook:
+
+    def __init__(self):
+        self.cache = {}
+
+    # Define a hook function
+    @torch.no_grad()
+    def get_hidden_states(self, *args):
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+            self.cache["encoder_hidden_states"] = kwinput["encoder_hidden_states"]
+        elif isinstance(module, FluxSingleTransformerBlock):
+            self.cache["hidden_states"] = kwinput["hidden_states"]
+
+        
+    @torch.no_grad()
+    def set_hidden_states(self, *args):
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+
+            kwinput["encoder_hidden_states"] =  self.cache["encoder_hidden_states"]
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            kwinput["hidden_states"][:, :4608 - 4096, :] = self.cache["hidden_states"][:, :4608 - 4096, :]

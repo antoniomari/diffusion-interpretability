@@ -20,3 +20,48 @@ Observations:
 
 ![alt text](image-4.png)
 Since it 
+
+
+# New ablations
+We denote `z` latents of our image and `z'` latents of another image, `p` prompt for our image (t5 emb), `p'` prompt for another image, `c = (t, pool(p))` conditioning information (timestep and pooled prompt with clipembedding) and `c' = (t, pool(p'))` conditioning info for other image.
+The first layer computes this map
+$$
+(z, p, c) \to (z + f_1(z, p, c), p + g_1(z, p, c)) =: (z_1, p_1)
+$$
+and 
+$$ 
+(z', p', c') \to (z' + f_1(z', p', c'), p' + g_1(z', p', c')) =: (z'_1, p'_1)
+$$ 
+### First attempt
+If we try to edit the attention (+ ff) output with a different seed (so z != z'):
+$$ (z, p, c) \to (z + f_1(z', p', c'), p' + g_1(z', p', c'))
+$$
+We get a noisy output (hypothesis: this is due to the substitution of the seed, since the denoising scheduler takes z as input something changes and we break the denoising process if we change with z')
+![alt text](image-12.png)
+
+Instead we edit only the prompt p' so that 
+$$
+(z, p, c) \to (z + f_1(z, p', c'), p' + g_1(z', p', c'))
+$$
+Similarly, for SingleTransformerLayer
+$$
+(p|z, c) \to p'|z + f_1(p'|z, c)
+$$
+(we are using seed 0 and seed 1 for the second prompt).
+Note that we can do the same operation on each layer, with the only difference being that `g` will depend on z' -> that is the only entrypoint for the information about the other seed z'.
+![alt text](image-13.png)
+![alt text](image-14.png)
+![alt text](image-15.png)
+![alt text](image-16.png)
+![alt text](image-17.png)
+
+Note that as we go closer to the end the output depends only on promp1 and the seed of prompt2 (but not on the prompt2)!
+
+![alt text](image-7.png)
+
+![alt text](image-9.png)
+
+![alt text](image-8.png)
+
+![alt text](image-10.png)
+

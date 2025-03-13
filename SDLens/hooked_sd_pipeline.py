@@ -34,6 +34,7 @@ class HookedDiffusionAbstractPipeline:
     def run_with_hooks(self, 
         *args,
         position_hook_dict: Dict[str, Union[Callable, List[Callable]]], 
+        position_pre_hook_dict: Dict[str, Union[Callable, List[Callable]]] = {},
         with_kwargs=False,
         **kwargs
     ):
@@ -52,12 +53,13 @@ class HookedDiffusionAbstractPipeline:
         hooks = []
 
         # Register hooks
-        for position, hook in position_hook_dict.items():
-            if isinstance(hook, list):
-                for h in hook:
-                    hooks.append(self._register_general_hook(position, h, with_kwargs))
-            else:
-                hooks.append(self._register_general_hook(position, hook, with_kwargs))
+        for is_pre_hook, hook_dict in [(True, position_pre_hook_dict), (False, position_hook_dict)]:
+            for position, hook in hook_dict.items():
+                if isinstance(hook, list):
+                    for h in hook:
+                        hooks.append(self._register_general_hook(position, h, with_kwargs, is_pre_hook))
+                else:
+                    hooks.append(self._register_general_hook(position, hook, with_kwargs, is_pre_hook))
 
         hooks = [hook for hook in hooks if hook is not None]
 
@@ -286,7 +288,7 @@ class HookedDiffusionAbstractPipeline:
         
         return attn_block.register_forward_hook(hook, with_kwargs=True) 
 
-    def _register_general_hook(self, position, hook, with_kwargs=False):
+    def _register_general_hook(self, position, hook, with_kwargs=False, is_pre_hook=False):
         if position == 'scheduler_pre':
             if not self.use_hooked_scheduler:
                 raise ValueError('Cannot register hooks on scheduler without using hooked scheduler')
@@ -299,7 +301,11 @@ class HookedDiffusionAbstractPipeline:
             return
 
         block = self._locate_block(position)
-        return block.register_forward_hook(hook, with_kwargs=with_kwargs)
+
+        if is_pre_hook:
+            return block.register_forward_pre_hook(hook, with_kwargs=with_kwargs)
+        else:
+            return block.register_forward_hook(hook, with_kwargs=with_kwargs)
 
     def to(self, *args, **kwargs):
         self.pipe = self.pipe.to(*args, **kwargs)
