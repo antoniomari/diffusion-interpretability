@@ -51,6 +51,7 @@ $$
 Note that we can do the same operation on each layer, with the only difference being that `g` will depend on z' -> that is the only entrypoint for the information about the other seed z'.
 ![alt text](image-13.png)
 ![alt text](image-14.png)
+![alt text](image-18.png)
 ![alt text](image-15.png)
 ![alt text](image-16.png)
 ![alt text](image-17.png)
