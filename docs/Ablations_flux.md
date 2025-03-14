@@ -4,21 +4,16 @@
 ## 1. Deactivate single layers
 Prompt: `"A cinematic shot of a unicorn walking on a rainbow."`
 ### TransformerLayers
-![alt text](image.png)
 Observations:
 1. Layers 0, 1, 2 seem to be vital for image formation (actually responsible for painting the image)
 2. All the other layers seem to be editing the image so to get variation of the same subject, not impacting alone the semantic. It does not seem any of these layers uniquely contain any of the concepts present in the image. Maybe these concepts are over-represented in multiple layers.
 
 ### SingleTransformerLayers
-![alt text](image-2.png)
 Observations:
 1. The last two layers seem to be intervening on the textures
 2. Also here, all the other layers individually seem to be performing transformations related to the scenic rendering (not the semantic). Maybe they are specialized for specific features (e.g. facial features require some specific details maybe many of those layers are for these). In either cases, no one of them seem to be vital for this prompt.
 
 ## 2. Deactivate blocks of consecutive layers
-![alt text](image-1.png)
-
-![alt text](image-4.png)
 Since it 
 
 
@@ -49,24 +44,27 @@ $$
 $$
 (we are using seed 0 and seed 1 for the second prompt).
 Note that we can do the same operation on each layer, with the only difference being that `g` will depend on z' -> that is the only entrypoint for the information about the other seed z'.
-![alt text](image-13.png)
-![alt text](image-14.png)
-![alt text](image-18.png)
-![alt text](image-15.png)
-![alt text](image-16.png)
-![alt text](image-17.png)
+
 
 Note that as we go closer to the end the output depends only on promp1 and the seed of prompt2 (but not on the prompt2)!
 
-![alt text](image-7.png)
-
-![alt text](image-9.png)
-
-![alt text](image-8.png)
-
-![alt text](image-10.png)
 
 
-Hypothesis:
-1. First two layers seem to attend to CLIP-embeddings
-2. ...
+
+## Text attention injection
+```
+(z, p, c) -> (z + f(z, p', c), p + w * g(z, p', c))
+```
+If `w = 1`
+
+![alt text](image.png)
+
+If `w = 5`
+
+![alt text](image-1.png)
+
+If `w = 10`
+
+![alt text](image-2.png)
+
+
