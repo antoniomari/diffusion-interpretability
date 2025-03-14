@@ -161,3 +161,100 @@ class PromptCachePreForwardHook:
 
         elif isinstance(module, FluxSingleTransformerBlock):
             kwinput["hidden_states"][:, :4608 - 4096, :] = self.cache["hidden_states"][:, :4608 - 4096, :]
+
+
+class AttentionAblationCacheHook:
+
+    def __init__(self):
+        self.cache = {}
+
+    # Define a hook function
+    @torch.no_grad()
+    def cache_text_stream(self, *args):
+        """ 
+            To be used as a pre forward hook on prompt used for ablation.
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+            self.cache["injected_encoder_hidden_states"] = kwinput["encoder_hidden_states"]
+        elif isinstance(module, FluxSingleTransformerBlock):
+            self.cache["injected_hidden_states"] = kwinput["hidden_states"]
+
+        
+    @torch.no_grad()
+    def cache_and_inject_pre_forward(self, *args):
+        """ 
+            To be used as a pre forward hook on the main prompt.
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+            # Cache the original text stream to restore after the forward pass
+            self.cache["encoder_hidden_states"] = kwinput["encoder_hidden_states"]
+            # inject the external text stream 
+            kwinput["encoder_hidden_states"] =  self.cache["injected_encoder_hidden_states"]
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            self.cache["hidden_states"] = kwinput["hidden_states"].clone()
+            kwinput["hidden_states"][:, :4608 - 4096, :] = self.cache["injected_hidden_states"][:, :4608 - 4096, :]
+        
+        
+    @torch.no_grad()
+    def set_ablated_attention(self, *args, weight=1.0):
+        """ 
+            To be used as a forward hook on main prompt.
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+            # Compute og_text_stream + g(image_stream, injected_text_stream, c)
+            hidden_states = output[1]
+
+            og_text_stream = self.cache["encoder_hidden_states"]
+            injected_text_stream = self.cache["injected_encoder_hidden_states"]
+
+            encoder_hidden_states = weight * (output[0] - injected_text_stream) + og_text_stream
+
+            if encoder_hidden_states.dtype == torch.float16:
+                encoder_hidden_states[torch.isposinf(encoder_hidden_states)] = 65504
+                encoder_hidden_states[torch.isneginf(encoder_hidden_states)] = -65504
+
+            assert torch.all(torch.isfinite(encoder_hidden_states)), "Output has NaN/Inf values"
+
+            return encoder_hidden_states, hidden_states
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+
+            weight_tensor = torch.full_like(output, weight)
+            weight_tensor[:, 512:, :] = 1.0
+
+            new_output = weight_tensor * (output - kwinput["hidden_states"]) + self.cache["hidden_states"]
+
+            # empirically found inf values with float16 (in the code clipping is done on -65504, 65504)
+            # but the clipping does not treat inf values
+            if new_output.dtype == torch.float16:
+                new_output[torch.isposinf(new_output)] = 65504
+                new_output[torch.isneginf(new_output)] = -65504
+
+            assert torch.all(torch.isfinite(new_output)), "Output has NaN/Inf values"
+
+            return new_output

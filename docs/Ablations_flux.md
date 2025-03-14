@@ -41,7 +41,7 @@ We get a noisy output (hypothesis: this is due to the substitution of the seed, 
 
 Instead we edit only the prompt p' so that 
 $$
-(z, p, c) \to (z + f_1(z, p', c'), p' + g_1(z', p', c'))
+(z, p, c) \to (z + f_1(z, p', c), p' + g_1(z, p', c))
 $$
 Similarly, for SingleTransformerLayer
 $$
@@ -66,3 +66,7 @@ Note that as we go closer to the end the output depends only on promp1 and the s
 
 ![alt text](image-10.png)
 
+
+Hypothesis:
+1. First two layers seem to attend to CLIP-embeddings
+2. ...
