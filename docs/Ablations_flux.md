@@ -68,3 +68,16 @@ If `w = 10`
 ![alt text](image-2.png)
 
 
+Same but Float32
+
+If `w = 1`
+
+![alt text](image-3.png)
+
+If `w = 5`
+
+![alt text](image-4.png)
+
+If `w = 10`
+
+![alt text](image-5.png)
