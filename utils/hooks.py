@@ -237,6 +237,8 @@ class AttentionAblationCacheHook:
             if encoder_hidden_states.dtype == torch.float16:
                 encoder_hidden_states[torch.isposinf(encoder_hidden_states)] = 65504
                 encoder_hidden_states[torch.isneginf(encoder_hidden_states)] = -65504
+            
+            self.cache["output_text"] = encoder_hidden_states
 
             assert torch.all(torch.isfinite(encoder_hidden_states)), "Output has NaN/Inf values"
 
@@ -255,6 +257,210 @@ class AttentionAblationCacheHook:
                 new_output[torch.isposinf(new_output)] = 65504
                 new_output[torch.isneginf(new_output)] = -65504
 
+            self.cache["output_text_image"] = new_output
+
             assert torch.all(torch.isfinite(new_output)), "Output has NaN/Inf values"
 
             return new_output
+
+
+class TransformerActivationCache:
+
+    def __init__(self):
+        self.cache = {}
+
+    @staticmethod
+    def _safe_clip(x: torch.Tensor):
+        if x.dtype == torch.float16:
+            x[torch.isposinf(x)] = 65504
+            x[torch.isneginf(x)] = -65504
+        return x
+
+    @torch.no_grad()
+    def cache_attention_activation(self, *args, full_output=False):
+        """ 
+            To be used as a forward hook on main prompt.
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+            # Cache f(z, p, c) 
+            encoder_hidden_states = output[0]            
+            hidden_states = output[1]
+
+            if full_output:
+                self.cache["image_stream"] = hidden_states 
+                self.cache["text_stream"] = encoder_hidden_states 
+            else:
+                self.cache["image_stream"] = hidden_states - kwinput["hidden_states"]
+                self.cache["text_stream"] = encoder_hidden_states - kwinput["encoder_hidden_states"]
+
+            self.cache["is_full_output"] = full_output
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            if full_output: 
+                self.cache["text_image_stream"] = output
+            else:
+                self.cache["text_image_stream"] = output - kwinput["hidden_states"]
+            self.cache["is_full_output"] = full_output
+
+    
+
+    @torch.no_grad()
+    def replace_attention_activation(self, *args):
+        """ 
+            x + f(X) replaced with x + cache[f] if cache["full_output"] is False
+            x + f(x) replaed with cache[f] if cache["full_output"] is True
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+
+            if self.cache["is_full_output"]:
+                image_stream_output = self.cache["image_stream"]
+                text_stream_output = self.cache["text_stream"]
+            else:
+                image_stream_output = kwinput["hidden_states"] + self.cache["image_stream"]       
+                text_stream_output = kwinput["encoder_hidden_states"] + self.cache["text_stream"]
+
+            return text_stream_output, image_stream_output
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+
+            if self.cache["is_full_output"]:
+                output = self.cache["text_image_stream"]
+            else:
+                output = kwinput["hidden_states"] + self.cache["text_image_stream"]
+
+            return output
+        
+    @torch.no_grad()
+    def replace_text_stream_input(self, *args, use_random=False, use_tensor: torch.Tensor = None):
+        """ 
+            x replaced with cache[x] 
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+
+
+            if use_random:
+                self.cache["text_stream"] = torch.randn_like(kwinput["encoder_hidden_states"],
+                                                             dtype=kwinput["encoder_hidden_states"].dtype,
+                                                             device=kwinput["encoder_hidden_states"].device)
+            elif use_tensor is not None:
+                self.cache["text_stream"] = use_tensor
+            else:
+                assert self.cache["is_full_output"], "A layer input must be replaced with the full output."
+
+                if "text_stream" not in self.cache and "text_image_stream" in self.cache: # case of single_transformer_block cached
+                    self.cache["text_stream"] = self.cache["text_image_stream"][:, :512, :]
+
+            kwinput["encoder_hidden_states"] = self.cache["text_stream"]
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+
+
+            if use_random:
+                self.cache["text_image_stream"] = torch.randn_like(kwinput["hidden_states"],
+                                                             dtype=kwinput["hidden_states"].dtype,
+                                                             device=kwinput["hidden_states"].device)
+            elif use_tensor:
+                raise NotImplementedError
+            else:
+                assert self.cache["is_full_output"], "A layer input must be replaced with the full output."
+
+
+            kwinput["hidden_states"] = self.cache["text_image_stream"]
+
+
+    @torch.no_grad()
+    def disable_text_residual(self, *args):
+        """ 
+            x + f(X) replaced with f(X)
+        """
+
+        TransformerActivationCache.reweight_text_stream(*args, residual_w=0, activation_w=1)
+    
+    @torch.no_grad()
+    def disable_text_attention(self, *args):
+        """ 
+            x + f(X) replaced with x
+        """
+        TransformerActivationCache.reweight_text_stream(*args, residual_w=1, activation_w=0)
+    
+        
+
+    @torch.no_grad()
+    def reweight_text_stream(self, *args, residual_w: float = 1.0, activation_w: float = 1.0):
+        """ 
+            x + f(X) replaced with w_res * x + w_act * f(x)
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+            residual = kwinput["encoder_hidden_states"]
+            activation = output[0] - residual
+
+            self.cache["text_residual"] = residual
+            self.cache["text_activation"] = activation
+
+            return TransformerActivationCache._safe_clip(residual * residual_w + activation * activation_w), TransformerActivationCache._safe_clip(output[1])
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            activation_w = torch.full_like(output, activation_w)
+            activation_w[:, 512:, :] = 1.0
+
+            residual_w = torch.full_like(output, residual_w)
+            residual_w[:, 512:, :] = 1.0
+
+            residual = kwinput["hidden_states"]
+            activation = output - kwinput["hidden_states"]
+
+            self.cache["residual"] = residual
+            self.cache["activation"] = activation
+
+            return TransformerActivationCache._safe_clip(residual * residual_w + activation * activation_w)
+        
+    
+    @torch.no_grad()
+    def clamp_output(self, *args):
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+
+            return TransformerActivationCache._safe_clip(output[0]), TransformerActivationCache._safe_clip(output[1])
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+
+            return TransformerActivationCache._safe_clip(output)
