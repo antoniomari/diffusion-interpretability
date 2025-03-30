@@ -1,4 +1,5 @@
-from typing import Literal
+import math
+from typing import Dict, Literal
 import torch
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
@@ -296,9 +297,12 @@ class TransformerActivationCache:
             "text_residual": [],
             "image_activation": [],
             "text_activation": [],
-            "image_text_residual": [],
-            "image_text_activation": []
+            "text_image_residual": [],
+            "text_image_activation": []
         }
+
+        self.registers_idx = None
+        self.registers: Dict[str, torch.Tensor] = None
 
     @staticmethod
     def _safe_clip(x: torch.Tensor):
@@ -306,6 +310,68 @@ class TransformerActivationCache:
             x[torch.isposinf(x)] = 65504
             x[torch.isneginf(x)] = -65504
         return x
+    
+    @torch.no_grad()
+    def fix_inf_values(self, *args):
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+            return TransformerActivationCache._safe_clip(output[0]), TransformerActivationCache._safe_clip(output[1])
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            return TransformerActivationCache._safe_clip(output)
+        
+    # Define a hook function
+    @torch.no_grad()
+    def cache_text_stream(self, *args):
+        """ 
+            To be used as a pre forward hook on prompt used for ablation.
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+            self.cache["injected_encoder_hidden_states"] = kwinput["encoder_hidden_states"]
+        elif isinstance(module, FluxSingleTransformerBlock):
+            self.cache["injected_hidden_states"] = kwinput["hidden_states"]
+        
+
+    @torch.no_grad()
+    def cache_and_inject_pre_forward(self, *args):
+        """ 
+            To be used as a pre forward hook on the main prompt.
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxTransformerBlock):
+            # Cache the original text stream to restore after the forward pass
+            self.cache["encoder_hidden_states"] = kwinput["encoder_hidden_states"]
+            # inject the external text stream 
+            kwinput["encoder_hidden_states"] =  self.cache["injected_encoder_hidden_states"]
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            self.cache["hidden_states"] = kwinput["hidden_states"].clone()
+            kwinput["hidden_states"][:, :512, :] = self.cache["injected_hidden_states"][:, :512, :]
+        
+        
+
 
     @torch.no_grad()
     def cache_attention_activation(self, *args, full_output=False):
@@ -421,7 +487,6 @@ class TransformerActivationCache:
 
         if isinstance(module, FluxTransformerBlock):
 
-            # TODO: extend tis also for FluxSingleTransformerBlock
             if stream == "text":
                 cache_key = "text_stream"
                 input_key = "encoder_hidden_states"
@@ -451,17 +516,209 @@ class TransformerActivationCache:
 
         elif isinstance(module, FluxSingleTransformerBlock):
 
-            if use_random:
-                self.cache["text_image_stream"] = torch.randn_like(kwinput["hidden_states"],
-                                                             dtype=kwinput["hidden_states"].dtype,
-                                                             device=kwinput["hidden_states"].device)
-            elif use_tensor:
-                raise NotImplementedError
+            if use_tensor is not None:
+                if stream == "text":
+                    kwinput["hidden_states"][:,:512,:] = use_tensor
+                elif stream == "image":
+                    kwinput["hidden_states"][:,512:,:] = use_tensor
+                else:
+                    kwinput["hidden_states"] = use_tensor
             else:
                 assert self.cache["is_full_output"], "A layer input must be replaced with the full output."
+                kwinput["hidden_states"] = self.cache["text_image_stream"]
+
+    def _get_top_k_registers_idx(self, latents_norm, device, k, stream: Literal["text", "image", 'both', "shared_threshold"] = 'shared_threshold'):
+
+        if self.registers_idx is not None:
+            return self.registers_idx
+
+        if stream == "shared_threshold":
+            _, topk_indices = torch.topk(latents_norm, k)
+            registers_idx = torch.zeros(512 + 4096, dtype=torch.bool, device=device)
+            registers_idx[topk_indices.view(-1)] = True  # Invert: False means "keep", True means "zero"
+            return registers_idx
+        elif stream == "image":
+            _, topk_indices = torch.topk(latents_norm[:, 512:], k)
+            registers_idx = torch.zeros(4096, dtype=torch.bool, device=device)
+            registers_idx[topk_indices.view(-1)] = True  # Invert: False means "keep", True means "zero" 
+            return registers_idx
+        elif stream == "text":
+            _, topk_indices = torch.topk(latents_norm[:, :512], k)
+            registers_idx = torch.zeros(4096, dtype=torch.bool, device=device)
+            registers_idx[topk_indices.view(-1)] = True  # Invert: False means "keep", True means "zero"    
+            return registers_idx
+        else:
+            _, topk_idx_text = torch.topk(latents_norm[:, :512], k[0])
+            text_registers_idx = torch.zeros(512, dtype=torch.bool, device=device)
+            text_registers_idx[topk_idx_text.view(-1)] = True  
+
+            _, topk_idx_image = torch.topk(latents_norm[:, 512:], k[1])
+            image_registers_idx = torch.zeros(4096, dtype=torch.bool, device=device)
+            image_registers_idx[topk_idx_image.view(-1)] = True  # Invert: False means "keep", True means "zero" 
+            return text_registers_idx, image_registers_idx
 
 
-            kwinput["hidden_states"] = self.cache["text_image_stream"]
+    @torch.no_grad()
+    def destroy_registers(self, *args, 
+                          k, 
+                          stream: Literal["text", "image", 'both', "shared_threshold"] = 'shared_threshold',
+                          random_ablation=False,
+                          lowest_norm=False):
+        """ 
+            x replaced with cache[x] 
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxSingleTransformerBlock):
+
+            latents = kwinput["hidden_states"]
+
+            assert latents.shape[0] == 1, "Batch > 1 non supported for this operation"
+
+            latents_norm = latents.norm(dim=-1)
+
+            if stream == "shared_threshold":
+
+                self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                k=k, stream=stream)
+                # combine with range mask
+                range_mask = torch.arange(4608, device=kwinput["hidden_states"].device).reshape(1, -1)
+                self.registers = {"text": kwinput["hidden_states"][: self.registers_idx & (range_mask < 512)],
+                                  "image": kwinput["hidden_states"][:, self.registers_idx & (range_mask >= 512)]}
+                
+                kwinput["hidden_states"][:, self.registers_idx] = 0
+
+            elif stream == "image":
+
+                self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)               
+                self.registers = {"text": None,
+                                    "image": kwinput["hidden_states"][:, 512:][:, self.registers_idx]}
+
+                kwinput["hidden_states"][:, 512:][:, self.registers_idx] = 0
+            elif stream == "text": 
+
+                self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)                                       
+                self.registers = {"text": kwinput["hidden_states"][:, :512][:, self.registers_idx],
+                                  "image": None}
+
+                kwinput["hidden_states"][:, :512][:, self.registers_idx] = 0
+            else:
+
+                if random_ablation:
+                    device = kwinput['hidden_states'].device
+                    text_ids = torch.randperm(512, device=device, generator=torch.Generator(device='cuda').manual_seed(42))[: k[0]]
+                    image_ids = torch.randperm(4096, device=device, generator=torch.Generator(device='cuda').manual_seed(432))[: k[1]]
+                    print(text_ids.shape)
+                    print(image_ids.shape)
+
+                    if self.registers_idx is None:
+                        self.registers_idx = [text_ids, image_ids]
+                        self.registers = {"text": kwinput["hidden_states"][:, 512:][:, image_ids],
+                                          "image": kwinput["hidden_states"][:, :512][:, text_ids]}
+
+                    kwinput["hidden_states"][:, 512:][:, image_ids] = 0
+                    kwinput["hidden_states"][:, :512][:, text_ids] = 0
+                
+                elif lowest_norm:
+                    self.registers_idx = self._get_top_k_registers_idx(-latents_norm, device=kwinput["hidden_states"].device,
+                                                                        k=k, stream=stream)
+                    self.registers = {"text": kwinput["hidden_states"][:, :512][:, self.registers_idx[0]],
+                                      "image": kwinput["hidden_states"][:, 512:][:, self.registers_idx[1]]}
+
+                    kwinput["hidden_states"][:, 512:][:, self.registers_idx[1]] = 0
+                    kwinput["hidden_states"][:, :512][:, self.registers_idx[0]] = 0
+
+                else:
+
+                    self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)
+                    self.registers = {"text": kwinput["hidden_states"][:, :512][:, self.registers_idx[0]],
+                                      "image": kwinput["hidden_states"][:, 512:][:, self.registers_idx[1]]}
+                    
+                    print(self.registers["text"].shape)
+                    print(self.registers["image"].shape)
+
+                    kwinput["hidden_states"][:, 512:][:, self.registers_idx[1]] = 0
+                    kwinput["hidden_states"][:, :512][:, self.registers_idx[0]] = 0
+        else:
+            raise AssertionError("Module should be FluxSingleTransformerBlock")
+
+
+    @torch.no_grad()
+    def set_cached_registers(self, *args, 
+                          k, 
+                          stream: Literal["text", "image", 'both', "shared_threshold"] = 'shared_threshold',
+                          random_ablation=False,
+                          lowest_norm=False):
+        """ 
+            x replaced with cache[x] 
+        """
+        
+        # Case 1: no kwards are passed to the module
+        if len(args) == 2:
+            module, input = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 3:
+            module, input, kwinput = args
+
+        if isinstance(module, FluxSingleTransformerBlock):
+
+            latents = kwinput["hidden_states"]
+            latents_norm = latents.norm(dim=-1)
+            self.registers_idx = None # force to recompute registers and not use the cached one (from previous generation)
+
+            if stream == "shared_threshold":
+                self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)
+                range_mask = torch.arange(4608, device=kwinput["hidden_states"].device).reshape(1, -1)
+                kwinput["hidden_states"][self.registers_idx & (range_mask < 512)] = self.registers['text'] 
+                kwinput["hidden_states"][self.registers_idx & (range_mask >= 512)] = self.registers['image'] 
+
+            elif stream == "image":
+                self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)          
+                kwinput["hidden_states"][:, 512:][self.registers_idx] = self.registers["image"]
+            elif stream == "text": 
+                self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)    
+
+                kwinput["hidden_states"][:, :512][self.registers_idx] = self.registers["text"]
+            else:
+
+                if random_ablation:
+                    device = kwinput['hidden_states'].device
+                    text_ids = torch.randperm(512, device=device, generator=torch.Generator(device='cuda').manual_seed(42))[: int(math.ceil((1 - percentile[0]) * 512))]
+                    image_ids = torch.randperm(4096, device=device, generator=torch.Generator(device='cuda').manual_seed(432))[: int(math.ceil((1 - percentile[1]) * 4096))]
+                    print(text_ids.shape)
+                    print(image_ids.shape)
+
+                    kwinput["hidden_states"][:, 512:][:, image_ids] = self.registers["image"]
+                    kwinput["hidden_states"][:, :512][:, text_ids] = self.registers["text"]
+                
+                elif lowest_norm:
+                    self.registers_idx = self._get_top_k_registers_idx(-latents_norm, device=kwinput["hidden_states"].device,
+                                                                        k=k, stream=stream)
+
+                    kwinput["hidden_states"][:, 512:][:, self.registers_idx[1]] = self.registers["image"]
+                    kwinput["hidden_states"][:, :512][:, self.registers_idx[0]] = self.registers["text"]
+
+                else:
+                    self.registers_idx = self._get_top_k_registers_idx(latents_norm, device=kwinput["hidden_states"].device,
+                                                                    k=k, stream=stream)
+
+                    kwinput["hidden_states"][:, 512:][:, self.registers_idx[1]] = self.registers["image"]
+                    kwinput["hidden_states"][:, :512][:, self.registers_idx[0]] = self.registers["text"]
+        else:
+            raise AssertionError("Module should be FluxSingleTransformerBlock")
+
 
 
     @torch.no_grad()

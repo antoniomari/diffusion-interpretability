@@ -3,6 +3,33 @@ from diffusers import StableDiffusionXLPipeline, IFPipeline, FluxPipeline
 from typing import List, Dict, Callable, Union
 import torch
 from .hooked_scheduler import HookedNoiseScheduler
+from diffusers.models.transformers.transformer_2d import Transformer2DModel
+from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
+from diffusers.models.attention import BasicTransformerBlock, FeedForward 
+
+@torch.no_grad
+def _safe_clip(x: torch.Tensor):
+    if x.dtype == torch.float16:
+        x[torch.isposinf(x)] = 65504
+        x[torch.isneginf(x)] = -65504
+    return x
+    
+@torch.no_grad()
+def fix_inf_values(*args):
+
+    # Case 1: no kwards are passed to the module
+    if len(args) == 3:
+        module, input, output = args
+    # Case 2: when kwargs are passed to the model as input
+    elif len(args) == 4:
+        module, input, kwinput, output = args
+
+    if isinstance(module, FluxTransformerBlock):
+        return _safe_clip(output[0]), _safe_clip(output[1])
+
+    elif isinstance(module, FluxSingleTransformerBlock):
+        return _safe_clip(output)
+        
 
 def retrieve(io):
     if isinstance(io, tuple):
@@ -60,6 +87,16 @@ class HookedDiffusionAbstractPipeline:
                         hooks.append(self._register_general_hook(position, h, with_kwargs, is_pre_hook))
                 else:
                     hooks.append(self._register_general_hook(position, hook, with_kwargs, is_pre_hook))
+        
+        # for avoiding inf values all layers
+        if isinstance(self.pipe, FluxPipeline):
+            for block, num_layers in ("transformer_blocks", 19), ("single_transformer_blocks", 38):
+                for i in range(num_layers):
+                    hooks.append(self._register_general_hook(f"transformer.{block}.{i}", 
+                                                            fix_inf_values, 
+                                                            with_kwargs=True, 
+                                                            is_pre_hook=False))
+
 
         hooks = [hook for hook in hooks if hook is not None]
 

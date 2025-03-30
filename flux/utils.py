@@ -1,5 +1,5 @@
 import torch
-from typing import Callable, Literal
+from typing import Callable, List, Literal
 from utils.hooks import ablate_block
 from SDLens.hooked_sd_pipeline import HookedFluxPipeline
 from utils.hooks import AttentionCacheForwardHook, TransformerActivationCache, AttentionAblationCacheHook
@@ -45,7 +45,6 @@ def plot_images_grid(image_rows, title_rows, nrows, ncols, figsize=(10, 10), tit
 
     image_rows = [image_rows[ncols * j : ncols*(j+1)] for j in range(nrows)]
     title_rows = [title_rows[ncols * j : ncols*(j+1)] for j in range(nrows)]
-
 
     rows = len(image_rows)  # Number of rows
     cols = max(len(row) for row in image_rows)  # Maximum number of columns
@@ -257,7 +256,7 @@ class Ablation:
                             ablated_forward_dict=lambda block_type, layer_num: {f"transformer.{block_type}.{layer_num}": lambda *args: ablator.set_ablated_attention(*args, weight=weight)})
         
         elif name == "replace_text_stream":
-            ablator = AttentionAblationCacheHook()
+            ablator = TransformerActivationCache()
             weight = kwargs["weight"] if "weight" in kwargs else 1.0
 
             return Ablation(ablator,
@@ -303,7 +302,7 @@ class Ablation:
                             vanilla_pre_forward_dict=lambda block_type, layer_num: {},
                             vanilla_forward_dict=lambda block_type, layer_num: {},
                             ablated_pre_forward_dict=lambda block_type, layer_num: {},
-                            ablated_forward_dict=lambda block_type, layer_num: {f"transformer.{block_type}.{i}": ablator.cache_residual_and_activation for i in range(19)})
+                            ablated_forward_dict=lambda block_type, layer_num: {})
         
         elif name == "reweight_image_stream": 
             ablator = TransformerActivationCache()
@@ -336,6 +335,47 @@ class Ablation:
                             vanilla_forward_dict=lambda block_type, layer_num: {},
                             ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.{block_type}.{layer_num}": ablator.cache_and_inject_pre_forward},
                             ablated_forward_dict=lambda block_type, layer_num: {f"transformer.{block_type}.{layer_num}": ablator.restore_text_stream})
+
+        elif name == "replace_intermediate_representation":
+            ablator = TransformerActivationCache()
+            tensor: torch.Tensor = kwargs["tensor"]
+
+            return Ablation(ablator,
+                            vanilla_pre_forward_dict=lambda block_type, layer_num: {},
+                            vanilla_forward_dict=lambda block_type, layer_num: {},
+                            ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.single_transformer_blocks.0": lambda *args: ablator.replace_stream_input(*args, use_tensor=tensor, stream='text_image')},
+                            ablated_forward_dict=lambda block_type, layer_num: {})
+
+        elif name == "destroy_registers":
+            ablator = TransformerActivationCache()
+            layers: List[int] = kwargs['layers']
+            k: float = kwargs["k"]
+            stream: str = kwargs['stream']
+            random: bool = kwargs["random"] if "random" in kwargs else False
+            lowest_norm: bool = kwargs["lowest_norm"] if "lowest_norm" in kwargs else False
+
+            return Ablation(ablator,
+                            vanilla_pre_forward_dict=lambda block_type, layer_num: {},
+                            vanilla_forward_dict=lambda block_type, layer_num: {},
+                            ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.single_transformer_blocks.{i}": lambda *args: ablator.destroy_registers(*args,  k=k, stream=stream, random_ablation=random, lowest_norm=lowest_norm) for i in layers},
+                            ablated_forward_dict=lambda block_type, layer_num: {})
+        
+        elif name == "patch_registers":
+            ablator = TransformerActivationCache()
+            layers: List[int] = kwargs['layers']
+            k: float = kwargs["k"]
+            stream: str = kwargs['stream']
+            random: bool = kwargs["random"] if "random" in kwargs else False
+            lowest_norm: bool = kwargs["lowest_norm"] if "lowest_norm" in kwargs else False
+
+            return Ablation(ablator,
+                            vanilla_pre_forward_dict=lambda block_type, layer_num:  {f"transformer.single_transformer_blocks.{i}": lambda *args: ablator.destroy_registers(*args, k=k, stream=stream, random_ablation=random, lowest_norm=lowest_norm) for i in layers},
+                            vanilla_forward_dict=lambda block_type, layer_num: {},
+                            ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.single_transformer_blocks.{i}": lambda *args: ablator.set_cached_registers(*args, k=k, stream=stream, random_ablation=random, lowest_norm=lowest_norm) for i in layers},
+                            ablated_forward_dict=lambda block_type, layer_num: {})
+
+
+
         
 
 def layer_ablation(ablation: Ablation, prompt: str, i: int, vanilla_prompt: str = None, block_type: Literal["transformer_blocks", "single_transformer_blocks"] = "transformer_blocks",
@@ -452,5 +492,86 @@ def ablate_attention_all_layers(ablation: Ablation,
         return images, labels, caches
     else:
         return images, labels
+
+
+
+def single_layer_ablation_with_cache(ablation: Ablation, 
+                                     prompt: str, 
+                                     layer: int,
+                                     vanilla_prompt: str = None, 
+                                     block_type: Literal["transformer_blocks", "single_transformer_blocks"] = "transformer_blocks", 
+                                     vanilla_seed=42, 
+                                     ablated_seed=42,
+                                     num_inference_steps=1):
+
+    assert isinstance(vanilla_seed, int)
+    assert isinstance(ablated_seed, int)
+    vanilla_seed = [vanilla_seed]
+    ablated_seed = [ablated_seed]
+
+    pipe = PIPE
+    clear_hooks()
+
+    vanilla_forward_dict = ablation.vanilla_forward_dict(block_type=block_type, layer_num=layer)
+    vanilla_pre_forward_dict = ablation.vanilla_pre_forward_dict(block_type=block_type, layer_num=layer)
+    ablated_pre_forward_dict = ablation.ablated_pre_forward_dict(block_type=block_type, layer_num=layer)
+    ablated_forward_dict = ablation.ablated_forward_dict(block_type=block_type, layer_num=layer)
+    assert isinstance(ablation.ablator, TransformerActivationCache)
+    ablator: TransformerActivationCache = ablation.ablator
+
+    # insert cache storing in dict
+    for block_type in 'transformer_blocks', "single_transformer_blocks":
+        NUM_LAYERS = 19 if block_type == "transformer_blocks" else 38
+        for i in range(NUM_LAYERS):
+            
+            if f"transformer.{block_type}.{i}" in ablated_forward_dict:
+                existing_hooks = ablated_forward_dict[f"transformer.{block_type}.{i}"]
+                if isinstance(existing_hooks, list):
+                    ablated_forward_dict[f"transformer.{block_type}.{i}"] = existing_hooks.append(ablator.cache_residual_and_activation)
+                else:
+                    ablated_forward_dict[f"transformer.{block_type}.{i}"] = [existing_hooks, ablator.cache_residual_and_activation]
+            else:
+                ablated_forward_dict[f"transformer.{block_type}.{i}"] = [ablator.cache_residual_and_activation]
+
+        
+    # Create generators
+    vanilla_gen = [torch.Generator(device="cpu").manual_seed(seed) for seed in vanilla_seed]
+    ablated_gen = [torch.Generator(device="cpu").manual_seed(seed) for seed in ablated_seed]
+
+    if vanilla_prompt is None:
+        vanilla_prompt = prompt
+
+    # with torch.autocast(device_type="cuda", dtype=dtype):
+    with torch.no_grad():
+            
+            if len(vanilla_pre_forward_dict) + len(vanilla_forward_dict) > 0:
+                _ = pipe.run_with_hooks(
+                    prompt=[""] * len(vanilla_gen),
+                    prompt_2=[vanilla_prompt] * len(vanilla_gen),
+                    position_hook_dict=vanilla_forward_dict,
+                    position_pre_hook_dict=vanilla_pre_forward_dict,
+                    with_kwargs=True,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale=0.0,
+                    generator=vanilla_gen,
+                    width=1024,
+                    height=1024,
+                )
+
+            output_ablated = pipe.run_with_hooks(
+                prompt=[""] * len(ablated_gen),
+                prompt_2=[prompt] * len(ablated_gen),
+                position_pre_hook_dict=ablated_pre_forward_dict,
+                position_hook_dict=ablated_forward_dict,
+                with_kwargs=True,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=0.0,
+                generator=ablated_gen,
+                width=1024,
+                height=1024,
+            )
+    
+    return output_ablated, ablator.cache_lists
+
 
 
