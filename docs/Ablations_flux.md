@@ -1,8 +1,25 @@
 # Ablations
+We denote `z` latents of our image and `z'` latents of another image, `p` prompt for our image (t5 emb), `p'` prompt for another image, `c = (t, pool(p))` conditioning information (timestep and pooled prompt with clipembedding) and `c' = (t, pool(p'))` conditioning info for other image.
+The first layer computes this map
+$$
+(z, p, c) \to (z + f_1(z, p, c), p + g_1(z, p, c)) =: (z_1, p_1)
+$$
+and 
+$$ 
+(z', p', c') \to (z' + f_1(z', p', c'), p' + g_1(z', p', c')) =: (z'_1, p'_1)
+$$ 
+Definitions:
+- `residual` is the residual stream
+- `activation` is output of attention summed to the output of MLP
+- `output`= `residual` + `activation` is the output of a transformer layer
 
+## Ablation 1. Input=Output
+Simple transformation that sets `activation` to 0 for both image and text stream.
+$$ (z, p, c) \to (z, p) =: (z_1, p_1) $$ 
+![alt text](ablation_img/abl1_input_equals_output.png)
+Along with the activation norm plot, we see how the first three layers are crucial in the image generation process (some transformations are moving input noise to a different space, while from layer 3 to 16 there are only minor variations, we see then higher variation in layers 17/18)
+![alt text](plots/norms_by_layer.png)
 
-## 1. Deactivate single layers
-Prompt: `"A cinematic shot of a unicorn walking on a rainbow."`
 ### TransformerLayers
 Observations:
 1. Layers 0, 1, 2 seem to be vital for image formation (actually responsible for painting the image)
@@ -13,22 +30,22 @@ Observations:
 1. The last two layers seem to be intervening on the textures
 2. Also here, all the other layers individually seem to be performing transformations related to the scenic rendering (not the semantic). Maybe they are specialized for specific features (e.g. facial features require some specific details maybe many of those layers are for these). In either cases, no one of them seem to be vital for this prompt.
 
-## 2. Deactivate blocks of consecutive layers
-Since it 
+## 2. Reweight text-stream components
+
+![alt text](image-14.png)
 
 
-# New ablations
-We denote `z` latents of our image and `z'` latents of another image, `p` prompt for our image (t5 emb), `p'` prompt for another image, `c = (t, pool(p))` conditioning information (timestep and pooled prompt with clipembedding) and `c' = (t, pool(p'))` conditioning info for other image.
-The first layer computes this map
-$$
-(z, p, c) \to (z + f_1(z, p, c), p + g_1(z, p, c)) =: (z_1, p_1)
-$$
-and 
-$$ 
-(z', p', c') \to (z' + f_1(z', p', c'), p' + g_1(z', p', c')) =: (z'_1, p'_1)
-$$ 
+![alt text](ablation_img/text_residual_1_activation_5.png)
+
+
+## 2.1 Forget text-stream
+This is aimed to understand, if we forget everything that we have on the text stream what is left?
+![alt text](ablation_img/forget_text_stream_1.png)
+![alt text](ablation_img/forget_text_stream_2.png)
+
+
 ### First attempt
-If we try to edit the attention (+ ff) output with a different seed (so z != z'):
+If we try to edit the layer `activation` with a different seed (so z != z'):
 $$ (z, p, c) \to (z + f_1(z', p', c'), p' + g_1(z', p', c'))
 $$
 We get a noisy output (hypothesis: this is due to the substitution of the seed, since the denoising scheduler takes z as input something changes and we break the denoising process if we change with z')

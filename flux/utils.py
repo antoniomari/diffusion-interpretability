@@ -1,3 +1,4 @@
+from functools import partial
 import torch
 from typing import Callable, List, Literal
 from utils.hooks import ablate_block
@@ -5,6 +6,7 @@ from SDLens.hooked_sd_pipeline import HookedFluxPipeline
 from utils.hooks import AttentionCacheForwardHook, TransformerActivationCache, AttentionAblationCacheHook
 import matplotlib.pyplot as plt
 from PIL import Image
+from flux_hooks import insert_extra_registers, discard_extra_registers
 
 
 PROMPT = "A cinematic shot of a professor sloth wearing a tuxedo at a BBQ party."
@@ -232,6 +234,13 @@ class Ablation:
                             vanilla_forward_dict=lambda block_type, layer_num: {f"transformer.{block_type}.{layer_num}": lambda *args: ablator.cache_attention_activation(*args, full_output=True)},
                             ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.transformer_blocks.0": lambda *args: ablator.replace_stream_input(*args, stream="text")},
                             ablated_forward_dict=lambda block_type, layer_num: {})
+        elif name == "input_to_intermediate_text_stream":
+            ablator = TransformerActivationCache()
+            return Ablation(ablator,
+                            vanilla_pre_forward_dict=lambda block_type, layer_num: {},
+                            vanilla_forward_dict=lambda block_type, layer_num: {f"transformer.transformer_blocks.0": lambda *args: ablator.cache_attention_activation(*args, full_output=True)},
+                            ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.{block_type}.{layer_num}": lambda *args: ablator.replace_stream_input(*args, stream="text")},
+                            ablated_forward_dict=lambda block_type, layer_num: {})
 
         elif name == "set_input_text":
 
@@ -374,8 +383,32 @@ class Ablation:
                             ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer.single_transformer_blocks.{i}": lambda *args: ablator.set_cached_registers(*args, k=k, stream=stream, random_ablation=random, lowest_norm=lowest_norm) for i in layers},
                             ablated_forward_dict=lambda block_type, layer_num: {})
 
+        elif name == "add_registers":
+            ablator = TransformerActivationCache()
+            num_registers: int = kwargs["num_registers"]
 
+            return Ablation(ablator,
+                            vanilla_pre_forward_dict=lambda block_type, layer_num:  {},
+                            vanilla_forward_dict=lambda block_type, layer_num: {},
+                            ablated_pre_forward_dict=lambda block_type, layer_num: {f"transformer": lambda *args: insert_extra_registers(*args, num_registers=num_registers)},
+                            ablated_forward_dict=lambda block_type, layer_num: {f"transformer": lambda *args: discard_extra_registers(*args, num_registers=num_registers)},)
+        
 
+        elif name == "edit_streams":
+            ablator = TransformerActivationCache()
+            stream: str = kwargs["stream"]
+            layers = kwargs["layers"]
+            edit_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] = kwargs["edit_fn"]
+
+            interventions = {f"transformer.transformer_blocks.{layer}": lambda *args: ablator.edit_streams(*args, recompute_fn=partial(edit_fn, layer=layer), stream=stream) for layer in layers if layer < 19}
+            interventions.update({f"transformer.single_transformer_blocks.{layer - 19}": lambda *args: ablator.edit_streams(*args, recompute_fn=partial(edit_fn, layer=layer), stream=stream) for layer in layers if layer >= 19})
+
+            return Ablation(ablator,
+                            vanilla_pre_forward_dict=lambda block_type, layer_num:  {},
+                            vanilla_forward_dict=lambda block_type, layer_num: {},
+                            ablated_pre_forward_dict=lambda block_type, layer_num: {},
+                            ablated_forward_dict=lambda block_type, layer_num: interventions,
+                        )
         
 
 def layer_ablation(ablation: Ablation, prompt: str, i: int, vanilla_prompt: str = None, block_type: Literal["transformer_blocks", "single_transformer_blocks"] = "transformer_blocks",
@@ -497,7 +530,7 @@ def ablate_attention_all_layers(ablation: Ablation,
 
 def single_layer_ablation_with_cache(ablation: Ablation, 
                                      prompt: str, 
-                                     layer: int,
+                                     layer: int = None,
                                      vanilla_prompt: str = None, 
                                      block_type: Literal["transformer_blocks", "single_transformer_blocks"] = "transformer_blocks", 
                                      vanilla_seed=42, 

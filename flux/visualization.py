@@ -152,7 +152,7 @@ def plot_activation_by_layer(cache: Dict[str, List[torch.Tensor]], stream: Liter
         ax.plot(time_steps, norm_activation, label='||act||', marker='s')
         ax.plot(time_steps, norm_output, label='||out||', marker='^')
 
-        ax.set_xlabel('Time Step')
+        ax.set_xlabel('Layer')
         ax.set_ylabel('Tensor Norm')
         ax.set_title(f'Norms of {mode} residual-stream, activaton, output over layers ')
         ax.grid(True)

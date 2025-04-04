@@ -1,5 +1,5 @@
 import math
-from typing import Dict, Literal
+from typing import Callable, Dict, Literal
 import torch
 from diffusers.models.transformers.transformer_2d import Transformer2DModel
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
@@ -426,15 +426,15 @@ class TransformerActivationCache:
             encoder_hidden_states = output[0]            
             hidden_states = output[1]
 
-            self.cache_lists["image_activation"].append(hidden_states - kwinput["hidden_states"])
-            self.cache_lists["text_activation"].append(encoder_hidden_states - kwinput["encoder_hidden_states"])
-            self.cache_lists["image_residual"].append(kwinput["hidden_states"])
-            self.cache_lists["text_residual"].append(kwinput["encoder_hidden_states"])
+            self.cache_lists["image_activation"].append((hidden_states - kwinput["hidden_states"]).detach().cpu())
+            self.cache_lists["text_activation"].append((encoder_hidden_states - kwinput["encoder_hidden_states"]).detach().cpu())
+            self.cache_lists["image_residual"].append(kwinput["hidden_states"].detach().cpu())
+            self.cache_lists["text_residual"].append(kwinput["encoder_hidden_states"].detach().cpu())
 
 
         elif isinstance(module, FluxSingleTransformerBlock):
-            self.cache_lists["text_image_activation"].append(output - kwinput["hidden_states"])
-            self.cache_lists["text_image_residual"].append(kwinput["hidden_states"])
+            self.cache_lists["text_image_activation"].append((output - kwinput["hidden_states"]).detach().cpu())
+            self.cache_lists["text_image_residual"].append(kwinput["hidden_states"].detach().cpu())
 
     
 
@@ -524,8 +524,13 @@ class TransformerActivationCache:
                 else:
                     kwinput["hidden_states"] = use_tensor
             else:
-                assert self.cache["is_full_output"], "A layer input must be replaced with the full output."
-                kwinput["hidden_states"] = self.cache["text_image_stream"]
+                if stream == "text":
+                    kwinput["hidden_states"][:,:512,:] = self.cache["text_stream"]
+                elif stream == "image":
+                    kwinput["hidden_states"][:,512:,:] = self.cache["image_stream"]
+                else:
+                    kwinput["hidden_states"] = self.cache["text_image_stream"]
+            
 
     def _get_top_k_registers_idx(self, latents_norm, device, k, stream: Literal["text", "image", 'both', "shared_threshold"] = 'shared_threshold'):
 
@@ -861,4 +866,45 @@ class TransformerActivationCache:
 
 
             raise NotImplementedError
+        
+
+    @torch.no_grad()
+    def edit_streams(self, *args, recompute_fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor], 
+                          stream: Literal["text", "image", "both"]):
+        """ 
+           recompute_fn will get as input the input tensor and the output tensor for such stream
+           and returns what should be the new modified output
+        """
+
+        # Case 1: no kwards are passed to the module
+        if len(args) == 3:
+            module, input, output = args
+        # Case 2: when kwargs are passed to the model as input
+        elif len(args) == 4:
+            module, input, kwinput, output = args
+
+        if isinstance(module, FluxTransformerBlock):
+
+            if stream == 'text':
+                output_text = recompute_fn(kwinput["encoder_hidden_states"], output[0])
+                output_image = output[1]
+            elif stream == 'image':
+                output_image = recompute_fn(kwinput["hidden_states"], output[1])
+                output_text = output[0]
+            else:
+                raise AssertionError("Branch not supported for this layer.")
+
+            return TransformerActivationCache._safe_clip(output_text), TransformerActivationCache._safe_clip(output_image)
+
+        elif isinstance(module, FluxSingleTransformerBlock):
+            
+            if stream == 'text':
+                output[:, :512] = recompute_fn(kwinput["hidden_states"][:, :512], output[:, :512])
+            elif stream == 'image':
+                output[:, 512:] = recompute_fn(kwinput["hidden_states"][:, 512:], output[:, 512:])
+            else:
+                output = recompute_fn(kwinput["hidden_states"], output)
+            
+            return TransformerActivationCache._safe_clip(output)
+        
 

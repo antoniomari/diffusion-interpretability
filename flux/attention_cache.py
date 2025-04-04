@@ -79,8 +79,14 @@ class CachedFluxAttnProcessor2_0:
             value = torch.cat([encoder_hidden_states_value_proj, value], dim=2)
 
         if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb)
-            key = apply_rotary_emb(key, image_rotary_emb)
+            query_to_embed = query[:, :, :4608]
+            key_to_embed = key[:, :, :4608]
+            query_to_embed = apply_rotary_emb(query_to_embed, image_rotary_emb)
+            key_to_embed = apply_rotary_emb(key_to_embed, image_rotary_emb)
+
+            query = torch.concat([query_to_embed, query[:, :, 4608:]], dim=2)
+            key = torch.concat([key_to_embed, key[:, :, 4608:]], dim=2)
+
 
         hidden_states = F.scaled_dot_product_attention(
             query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=False

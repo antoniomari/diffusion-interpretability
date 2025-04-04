@@ -1,5 +1,5 @@
 import einops
-from diffusers import StableDiffusionXLPipeline, IFPipeline, FluxPipeline
+from diffusers import StableDiffusionXLPipeline, IFPipeline, FluxPipeline, PixArtSigmaPipeline
 from typing import List, Dict, Callable, Union
 import torch
 from .hooked_scheduler import HookedNoiseScheduler
@@ -368,3 +368,6 @@ class HookedFluxPipeline(HookedDiffusionAbstractPipeline):
 
 class HookedIFPipeline(HookedDiffusionAbstractPipeline):
     parent_cls = IFPipeline
+
+class HookedPixArtPipeline(HookedDiffusionAbstractPipeline):
+    parent_cls = PixArtSigmaPipeline
